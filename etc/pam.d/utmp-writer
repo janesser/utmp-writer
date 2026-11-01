@@ -1,0 +1,15 @@
+#
+# PAM integration for utmp-writer
+#
+# This line must be added to /etc/pam.d/common-session (and any other
+# PAM stack that handles session open/close, e.g. /etc/pam.d/login,
+# /etc/pam.d/sshd):
+#
+#   session optional    pam_exec.so /usr/local/bin/utmp-writer
+#
+# pam_exec.so runs /usr/local/bin/utmp-writer on every session open and
+# close.  PAM passes PAM_USER / PAM_TTY / PAM_PID / PAM_RHOST /
+# PAM_TYPE (open_session / close_session) to the executed program, which
+# adds or removes the utmp entry accordingly.
+#
+session optional    pam_exec.so /usr/local/bin/utmp-writer

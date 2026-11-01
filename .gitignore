@@ -1,0 +1,14 @@
+# build artifacts
+build/
+*.o
+*.so
+
+# installed binary (goes to /usr/local)
+/usr/local/bin/utmp-writer
+
+# editor/IDE
+*.swp
+*.swo
+*~
+.vscode/
+.idea/

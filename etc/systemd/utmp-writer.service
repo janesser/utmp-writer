@@ -1,0 +1,20 @@
+[Unit]
+Description=utmp-writer: populate /run/utmp on systems without systemd utmp support
+Documentation=https://github.com/janesser/utmp-writer
+After=local-fs.target
+Requires=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/utmp-writer --sync
+RemainAfterExit=no
+
+# The utmp file must be created before any login happens, so that
+# `wall`/`who`/`write` have a destination list.  PAM (pam_exec.so) keeps
+# the file up to date while sessions run.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+[Install]
+WantedBy=multi-user.target
