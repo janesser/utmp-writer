@@ -29,10 +29,9 @@ nobody.
 (`open_session` / `close_session`) to the executed program, which adds or
 removes the utmp entry accordingly.
 
-A oneshot systemd service (`utmp-writer.service`) runs `--sync` at boot so
-`/run/utmp` exists and reflects the last-known sessions even if PAM has not
-yet run for the current boot. The sync reads the wtmpdb records that
-`pam_wtmpdb.so` writes to `/var/log/wtmp.db`.
+A oneshot systemd service (`utmp-writer.service`) runs `--create` at boot so
+`/run/utmp` exists and carries the boot record even before the first session
+opens.  PAM keeps the file up to date while sessions run.
 
 ## Install
 
@@ -43,7 +42,7 @@ make && sudo make install
 This installs:
 
 - `/usr/local/bin/utmp-writer` (the binary)
-- `/usr/local/etc/systemd/system/utmp-writer.service` (boot-time sync)
+- `/usr/local/lib/systemd/system/utmp-writer.service` (boot-time record)
 - the `pam_exec.so` line into `/etc/pam.d/common-session`
 
 Then activate:
@@ -70,7 +69,6 @@ utmp-writer --add USER TTY PID [HOST] [SECONDS]
                          add a utmp entry (default start time = now)
 utmp-writer --remove USER TTY
                          remove a utmp entry
-utmp-writer --sync       rebuild /run/utmp from wtmpdb records
 utmp-writer --create     (re)create /run/utmp, exit
 ```
 
@@ -81,11 +79,9 @@ otherwise appends. Entries for active sessions are `USER_PROCESS` (7);
 closed sessions become `DEAD_PROCESS` (8), which `wall()`/`who()` ignore.
 The boot record is `BOOT_TIME` (2).
 
-`utmp-writer` is a single static C file with no dependencies beyond the
-C library and `libdl` (for the optional SQLite3 lookup). The SQLite3
-symbols are loaded dynamically (`dlopen`/`dlsym`), so the package builds
-without `libsqlite3-dev` and degrades gracefully when the wtmpdb database
-is unavailable.
+The program is a single C file with **no dependencies beyond the C library**.
+It includes `<utmp.h>` and reads `struct utmp` at compile time, so it stays
+correct when glibc changes the layout.
 
 ## Author
 

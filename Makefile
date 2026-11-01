@@ -7,13 +7,12 @@
 #
 CC       = gcc
 CFLAGS   = -Wall -Wextra -O2
-LDFLAGS  = -ldl
+LDFLAGS  =
 
 PREFIX   = /usr/local
 BINDIR   = $(PREFIX)/bin
 SYSCONFDIR = $(PREFIX)/etc
 SYSTEMDDIR = $(PREFIX)/lib/systemd/system
-PAMD     = /etc/pam.d
 
 NAME     = utmp-writer
 SRCDIR   = src

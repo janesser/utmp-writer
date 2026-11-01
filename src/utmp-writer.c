@@ -16,9 +16,9 @@
  * (open_session / close_session) to the executed program; utmp entries
  * are added or removed accordingly.
  *
- * A oneshot systemd service (utmp-writer.service) runs --sync at boot so
- * /run/utmp exists and reflects the last-known sessions even if PAM has
- * not yet run for the current boot.
+ * A oneshot systemd service (utmp-writer.service) runs --create at boot
+ * so /run/utmp exists and carries the boot record even before the first
+ * session opens.  PAM keeps the file up to date while sessions run.
  *
  * Usage:
  *   utmp-writer              PAM mode: read PAM_* from the environment
@@ -26,7 +26,6 @@
  *                            add a utmp entry (default start time = now)
  *   utmp-writer --remove USER TTY
  *                            remove a utmp entry
- *   utmp-writer --sync       rebuild /run/utmp from wtmpdb records
  *   utmp-writer --create     (re)create /run/utmp, exit
  *
  * Author: jan
@@ -35,7 +34,6 @@
 
 #define _GNU_SOURCE
 
-#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -61,9 +59,6 @@
 /* The utmp_id suffix: last 4 characters of the tty name. */
 #define UT_ID_SIZE 4
 
-/* wtmpdb database location (written by pam_wtmpdb.so). */
-#define WTMPDB_FILE "/var/log/wtmp.db"
-
 /*
  * The utmp file location.  Normally UTMP_FILE; override with the UTMP_PATH
  * environment variable (testing only, not for production use).
@@ -74,7 +69,7 @@ get_utmp_path(void)
     const char *env = getenv("UTMP_PATH");
     if (env && env[0] != '\0')
         return env;
-    return UTMP_FILE;
+    return UTMP_FILE_PATH;
 }
 
 /* ------------------------------------------------------------------ */
@@ -385,181 +380,6 @@ do_create(void)
 }
 
 /* ------------------------------------------------------------------ */
-/*  --sync (wtmpdb)                                                   */
-/* ------------------------------------------------------------------ */
-
-/*
- * SQLite3 symbols, loaded dynamically so the program does not require
- * libsqlite3-dev at compile time.
- */
-typedef struct sqlite3 sqlite3_handle;
-
-typedef struct
-{
-    void *handle;
-    int (*open)(const char *, sqlite3_handle **);
-    int (*exec)(sqlite3_handle *, const char *,
-                int (*)(void *, int, char **, char **), void *, char **);
-    void (*free)(char *);
-} sqlite3_api;
-
-static sqlite3_api *
-load_sqlite3(void)
-{
-    static sqlite3_api api;
-    static int loaded = 0;
-
-    if (loaded)
-        return &api;
-
-    loaded = 1;
-    api.handle = dlopen("libsqlite3.so.0", RTLD_LAZY);
-    if (!api.handle)
-    {
-        api.handle = dlopen("libsqlite3.so", RTLD_LAZY);
-        if (!api.handle)
-            return NULL;
-    }
-
-    api.open = (int (*)(const char *, sqlite3_handle **))dlsym(api.handle, "sqlite3_open");
-    api.exec = (int (*)(sqlite3_handle *, const char *,
-                        int (*)(void *, int, char **, char **), void *, char **))dlsym(
-        api.handle, "sqlite3_exec");
-    api.free = (void (*)(char *))dlsym(api.handle, "sqlite3_free");
-
-    if (!api.open || !api.exec || !api.free)
-    {
-        dlclose(api.handle);
-        return NULL;
-    }
-
-    return &api;
-}
-
-/*
- * wtmpdb row collector: for every row it writes the utmp entry for the
- * active session into /run/utmp.
- *
- * Returns 1 to continue the iteration.
- */
-static int
-wtmpdb_callback(void *arg, int ncolumn, char **azValue, char **azColName)
-{
-    (void)arg;
-    (void)azColName;
-    (void)ncolumn;
-
-    struct utmp utmp;
-
-    /* Column order: User, TTY, RemoteHost, Login. */
-    const char *user = azValue[0];
-    const char *tty = azValue[1];
-    const char *host = azValue[2];
-    const char *login = azValue[3];
-
-    if (!user || !tty)
-        return 0;
-
-    create_utmp_file();
-
-    utmp_zero(&utmp);
-    utmp.ut_type = USER_PROCESS;
-    utmp.ut_pid = (pid_t)(long int)strtol(login, NULL, 10);
-    strncpy(utmp.ut_line, tty, UT_LINESIZE);
-    utmp.ut_line[UT_LINESIZE - 1] = '\0';
-    utmp_id_from_tty(tty, utmp.ut_id);
-    strncpy(utmp.ut_user, user, UT_NAMESIZE);
-    utmp.ut_user[UT_NAMESIZE - 1] = '\0';
-    strncpy(utmp.ut_host, host ? host : "local", UT_HOSTSIZE);
-    utmp.ut_host[UT_HOSTSIZE - 1] = '\0';
-    utmp.ut_tv.tv_sec = (time_t)(long int)strtol(login, NULL, 10);
-    utmp.ut_tv.tv_usec = 0;
-    utmp.ut_session = utmp.ut_pid;
-
-    if (write_utmp(&utmp) < 0)
-        fprintf(stderr, "utmp-writer: failed to write utmp entry for %s@%s\n",
-                user, tty);
-
-    return 0;
-}
-
-/*
- * Rebuild /run/utmp from the wtmpdb table that pam_wtmpdb.so writes to
- * /var/log/wtmp.db.
- *
- * The wtmpdb table records every login:
- *   ID    Type    User    Login              Logout             TTY      RemoteHost  Service
- *   1     3     jan     1787493751516856   1787494516111241   tty2     local       None
- *
- * `Logout == NULL` means the session is still active.  Active sessions
- * become USER_PROCESS entries; closed sessions become DEAD_PROCESS
- * entries (which `wall()`/`who()` ignore).
- *
- * Returns 0 on success (even if the database is unavailable).
- */
-static int
-do_sync(void)
-{
-    sqlite3_api *api = load_sqlite3();
-    struct stat st;
-    char *err = NULL;
-
-    create_utmp_file();
-    write_boot_record();
-
-    if (!api)
-    {
-        fprintf(stderr,
-                "utmp-writer: " UTMP_FILE_PATH
-                " sync: libsqlite3 unavailable (skipping wtmpdb)\n");
-        return 0;
-    }
-
-    if (stat(WTMPDB_FILE, &st) != 0)
-    {
-        fprintf(stderr,
-                "utmp-writer: " UTMP_FILE_PATH
-                " sync: no wtmpdb at %s (skipping)\n", WTMPDB_FILE);
-        return 0;
-    }
-
-    sqlite3_handle *db = NULL;
-    int rc = api->open(WTMPDB_FILE, &db);
-    if (rc != 0)
-    {
-        fprintf(stderr, "utmp-writer: wtmpdb open failed: %d\n", rc);
-        return 0;
-    }
-
-    rc = api->exec(db,
-                       "SELECT \"User\", \"TTY\", \"RemoteHost\", \"Login\" "
-                       "FROM \"wtmp\" WHERE \"Logout\" IS NULL;",
-                       wtmpdb_callback, (void *)api, &err);
-    if (rc != 0)
-    {
-        fprintf(stderr, "utmp-writer: wtmpdb query failed: %s\n",
-                err ? err : "unknown");
-        if (err)
-            free(err);
-    }
-
-    /* The database handle is never closed: the symbols are dlsym'd and
-       dlclose() would invalidate them after this call returns. */
-    (void)db;
-    if (rc != 0)
-    {
-        fprintf(stderr, "utmp-writer: wtmpdb query failed: %s\n",
-                err ? err : "unknown");
-        if (err && api->free)
-            api->free(err);
-        return 0;
-    }
-
-    fprintf(stderr, "utmp-writer: " UTMP_FILE_PATH " sync: wtmpdb OK\n");
-    return 0;
-}
-
-/* ------------------------------------------------------------------ */
 /*  main                                                              */
 /* ------------------------------------------------------------------ */
 
@@ -574,8 +394,6 @@ main(int argc, char *argv[])
             return do_remove(argc - 2, argv + 2);
         if (strcmp(argv[1], "--create") == 0)
             return do_create();
-        if (strcmp(argv[1], "--sync") == 0)
-            return do_sync();
         fprintf(stderr, "utmp-writer: unknown option %s\n", argv[1]);
         return -1;
     }
