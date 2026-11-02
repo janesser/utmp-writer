@@ -36,8 +36,18 @@ systemctl daemon-reload
 systemctl enable --now utmp-writer
 ```
 
-This installs `/usr/local/bin/utmp-writer`, the systemd service and appends the
-`pam_exec.so` line to `/etc/pam.d/common-session`.
+This installs `/usr/local/bin/utmp-writer` and the systemd service.
+
+The `pam_exec.so` line is a **manual prerequisite** — it must be appended to
+`/etc/pam.d/common-session` (root) for the real-time PAM trigger to work:
+
+```
+session optional    pam_exec.so /usr/local/bin/utmp-writer
+```
+
+(That one line, or the chezmoi run script
+`.chezmoiscripts/run_once_2_utmp_writer_pam.sh`, is required; without it `who`
+and `wall` stay empty while sessions run.)
 
 ## Usage
 
