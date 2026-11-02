@@ -1,9 +1,9 @@
 # utmp-writer
 
-Keep `/run/utmp` populated on Ubuntu systems where systemd does not provide
-utmp support.
+Make `wall`, `who` and `write` work again on Ubuntu systems where systemd does
+not provide `/run/utmp`.
 
-## Problem
+## The problem
 
 Ubuntu 26.04 ships with systemd 259.9, which is built with `-UTMP`:
 
@@ -11,55 +11,33 @@ Ubuntu 26.04 ships with systemd 259.9, which is built with `-UTMP`:
 - `systemd-utmcd` is absent
 - `pam_utmp.so` is absent
 
-Without a utmp file, `wall`, `who` and `write` have no destination list and
-silently deliver nothing. `who` shows only `system boot`, `wall` writes to
-nobody.
+`wall`, `who` and `write` get their destination list from `/run/utmp`. Without
+it, `who` shows only `system boot`, `wall` writes to nobody and a shutdown
+warning (e.g. `auto-poweroff.sh`) never reaches the logged-in sessions.
 
-## Solution
+## What this does
 
-`utmp-writer` maintains `/run/utmp` from PAM login records:
+`utmp-writer` maintains `/run/utmp` yourself:
 
-```
-/etc/pam.d/common-session:
-    session optional    pam_exec.so /usr/local/bin/utmp-writer
-```
+- **PAM** (`pam_exec.so` in `/etc/pam.d/common-session`) adds an entry when a
+  session opens and marks it `DEAD_PROCESS` when it closes — real-time, for
+  every login, SSH included.
+- **systemd** (one-shot `utmp-writer.service`) creates `/run/utmp` + the boot
+  record at boot, so the file exists before the first session opens.
 
-`pam_exec.so` runs `utmp-writer` on every session open and close. PAM passes
-`PAM_USER` / `PAM_TTY` / `PAM_PID` / `PAM_RHOST` / `PAM_TYPE`
-(`open_session` / `close_session`) to the executed program, which adds or
-removes the utmp entry accordingly.
-
-A oneshot systemd service (`utmp-writer.service`) runs `--create` at boot so
-`/run/utmp` exists and carries the boot record even before the first session
-opens.  PAM keeps the file up to date while sessions run.
+After install, `who` shows logged-in users and `wall` broadcasts to all of
+them.
 
 ## Install
 
 ```
 make && sudo make install
-```
-
-This installs:
-
-- `/usr/local/bin/utmp-writer` (the binary)
-- `/usr/local/lib/systemd/system/utmp-writer.service` (boot-time record)
-- the `pam_exec.so` line into `/etc/pam.d/common-session`
-
-Then activate:
-
-```
 systemctl daemon-reload
 systemctl enable --now utmp-writer
 ```
 
-## Verify
-
-```
-who                    # shows logged-in users
-wall                   # broadcasts to all login terminals
-ls -la /run/utmp       # exists, root-owned, mode 0644
-systemctl status utmp-writer
-```
+This installs `/usr/local/bin/utmp-writer`, the systemd service and appends the
+`pam_exec.so` line to `/etc/pam.d/common-session`.
 
 ## Usage
 
@@ -72,16 +50,14 @@ utmp-writer --remove USER TTY
 utmp-writer --create     (re)create /run/utmp, exit
 ```
 
-## How it works
+## Why it works on the next release too
 
-`pututline()` updates an existing entry with a matching `ut_line` in place,
-otherwise appends. Entries for active sessions are `USER_PROCESS` (7);
-closed sessions become `DEAD_PROCESS` (8), which `wall()`/`who()` ignore.
-The boot record is `BOOT_TIME` (2).
-
-The program is a single C file with **no dependencies beyond the C library**.
-It includes `<utmp.h>` and reads `struct utmp` at compile time, so it stays
-correct when glibc changes the layout.
+- The program includes `<utmp.h>` and reads `struct utmp` at compile time —
+  correct layout even if glibc changes.
+- `pam_exec.so` is part of `libpam-modules`, shipped since 1998; the PAM
+  environment variables it passes are documented behavior.
+- `/run/utmp` is only created when missing; if a future systemd brings back its
+  own utmp writer, this service is redundant, never conflicting.
 
 ## Author
 
